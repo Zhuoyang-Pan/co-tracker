@@ -22,6 +22,8 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         queries,
         iters=4,
         is_train=False,
+        fmaps_pyramid=None,
+        track_feat_support_pyramid=None,
         add_space_attn=True,
         fmaps_chunk_size=200,
     ):
@@ -78,53 +80,56 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         H4, W4 = H // self.stride, W // self.stride
         # Compute convolutional features for the video or for the current chunk in case of online mode
 
-        if T > fmaps_chunk_size:
-            fmaps = []
-            for t in range(0, T, fmaps_chunk_size):
-                video_chunk = video[:, t : t + fmaps_chunk_size]
-                fmaps_chunk = self.fnet(video_chunk.reshape(-1, C_, H, W))
-                T_chunk = video_chunk.shape[1]
-                C_chunk, H_chunk, W_chunk = fmaps_chunk.shape[1:]
-                fmaps.append(fmaps_chunk.reshape(B, T_chunk, C_chunk, H_chunk, W_chunk))
-            fmaps = torch.cat(fmaps, dim=1).reshape(-1, C_chunk, H_chunk, W_chunk)
-        else:
-            fmaps = self.fnet(video.reshape(-1, C_, H, W))
-        fmaps = fmaps.permute(0, 2, 3, 1)
-        fmaps = fmaps / torch.sqrt(
-            torch.maximum(
-                torch.sum(torch.square(fmaps), axis=-1, keepdims=True),
-                torch.tensor(1e-12, device=fmaps.device),
+        if fmaps_pyramid is None:
+            if T > fmaps_chunk_size:
+                fmaps = []
+                for t in range(0, T, fmaps_chunk_size):
+                    video_chunk = video[:, t : t + fmaps_chunk_size]
+                    fmaps_chunk = self.fnet(video_chunk.reshape(-1, C_, H, W))
+                    T_chunk = video_chunk.shape[1]
+                    C_chunk, H_chunk, W_chunk = fmaps_chunk.shape[1:]
+                    fmaps.append(fmaps_chunk.reshape(B, T_chunk, C_chunk, H_chunk, W_chunk))
+                fmaps = torch.cat(fmaps, dim=1).reshape(-1, C_chunk, H_chunk, W_chunk)
+            else:
+                fmaps = self.fnet(video.reshape(-1, C_, H, W))
+            fmaps = fmaps.permute(0, 2, 3, 1)
+            fmaps = fmaps / torch.sqrt(
+                torch.maximum(
+                    torch.sum(torch.square(fmaps), axis=-1, keepdims=True),
+                    torch.tensor(1e-12, device=fmaps.device),
+                )
             )
-        )
-        fmaps = fmaps.permute(0, 3, 1, 2).reshape(
-            B, -1, self.latent_dim, H // self.stride, W // self.stride
-        )
-        fmaps = fmaps.to(dtype)
+            fmaps = fmaps.permute(0, 3, 1, 2).reshape(
+                B, -1, self.latent_dim, H // self.stride, W // self.stride
+            )
+            fmaps = fmaps.to(dtype)
 
-        # We compute track features
-        fmaps_pyramid = []
-        track_feat_pyramid = []
-        track_feat_support_pyramid = []
-        fmaps_pyramid.append(fmaps)
-        for i in range(self.corr_levels - 1):
-            fmaps_ = fmaps.reshape(
-                B * T, self.latent_dim, fmaps.shape[-2], fmaps.shape[-1]
-            )
-            fmaps_ = F.avg_pool2d(fmaps_, 2, stride=2)
-            fmaps = fmaps_.reshape(
-                B, T, self.latent_dim, fmaps_.shape[-2], fmaps_.shape[-1]
-            )
+            # We compute track features
+            fmaps_pyramid = []
+            
             fmaps_pyramid.append(fmaps)
+            for i in range(self.corr_levels - 1):
+                fmaps_ = fmaps.reshape(
+                    B * T, self.latent_dim, fmaps.shape[-2], fmaps.shape[-1]
+                )
+                fmaps_ = F.avg_pool2d(fmaps_, 2, stride=2)
+                fmaps = fmaps_.reshape(
+                    B, T, self.latent_dim, fmaps_.shape[-2], fmaps_.shape[-1]
+                )
+                fmaps_pyramid.append(fmaps)
 
-        for i in range(self.corr_levels):
-            track_feat, track_feat_support = self.get_track_feat(
-                fmaps_pyramid[i],
-                queried_frames,
-                queried_coords / 2**i,
-                support_radius=self.corr_radius,
-            )
-            track_feat_pyramid.append(track_feat.repeat(1, T, 1, 1))
-            track_feat_support_pyramid.append(track_feat_support.unsqueeze(1))
+        if track_feat_support_pyramid is None:
+            track_feat_pyramid = []
+            track_feat_support_pyramid = []
+            for i in range(self.corr_levels):
+                track_feat, track_feat_support = self.get_track_feat(
+                    fmaps_pyramid[i],
+                    queried_frames,
+                    queried_coords / 2**i,
+                    support_radius=self.corr_radius,
+                )
+                track_feat_pyramid.append(track_feat.repeat(1, T, 1, 1))
+                track_feat_support_pyramid.append(track_feat_support.unsqueeze(1))
 
         D_coords = 2
 
